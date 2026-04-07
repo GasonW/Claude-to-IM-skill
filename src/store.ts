@@ -25,6 +25,23 @@ import { CTI_HOME } from './config.js';
 const DATA_DIR = path.join(CTI_HOME, 'data');
 const MESSAGES_DIR = path.join(DATA_DIR, 'messages');
 
+// ── CLI Session Interface ──
+
+/**
+ * CLI Session metadata from ~/.claude/sessions/{pid}.json
+ * These are sessions started directly from the terminal with `claude` command.
+ */
+export interface CliSession {
+  sessionId: string;      // SDK session ID (used for --resume)
+  pid: number;            // Process ID
+  cwd: string;            // Working directory
+  startedAt: number;      // Start timestamp (ms since epoch)
+  kind: string;           // Session kind (e.g., "interactive")
+  entrypoint: string;     // Entry point (e.g., "cli")
+  name: string;           // Session name/alias (e.g., "enhance-session-management")
+  isActive: boolean;      // Whether the process is still running
+}
+
 // ── Helpers ──
 
 function ensureDir(dir: string): void {
@@ -209,12 +226,17 @@ export class JsonFileStore implements BridgeStore {
   upsertChannelBinding(data: UpsertChannelBindingInput): ChannelBinding {
     const key = `${data.channelType}:${data.chatId}`;
     const existing = this.bindings.get(key);
+    // Access sdkSessionId from data (may not be in the type definition)
+    const dataWithSdk = data as unknown as { sdkSessionId?: string };
+
     if (existing) {
       const updated: ChannelBinding = {
         ...existing,
         codepilotSessionId: data.codepilotSessionId,
         workingDirectory: data.workingDirectory,
         model: data.model,
+        // Use provided sdkSessionId if available, otherwise keep existing
+        sdkSessionId: dataWithSdk.sdkSessionId ?? existing.sdkSessionId,
         updatedAt: now(),
       };
       this.bindings.set(key, updated);
@@ -226,7 +248,8 @@ export class JsonFileStore implements BridgeStore {
       channelType: data.channelType,
       chatId: data.chatId,
       codepilotSessionId: data.codepilotSessionId,
-      sdkSessionId: '',
+      // Use provided sdkSessionId if available
+      sdkSessionId: dataWithSdk.sdkSessionId || '',
       workingDirectory: data.workingDirectory,
       model: data.model,
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
@@ -253,6 +276,81 @@ export class JsonFileStore implements BridgeStore {
     const all = Array.from(this.bindings.values());
     if (!channelType) return all;
     return all.filter((b) => b.channelType === channelType);
+  }
+
+  // ── CLI Session Support ──
+
+  /**
+   * Check if a process is still running.
+   * Uses kill(pid, 0) which doesn't actually send a signal but checks existence.
+   */
+  private isProcessActive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * List all CLI sessions from ~/.claude/sessions/*.json
+   * These are sessions started directly from the terminal with `claude` command.
+   */
+  listCliSessions(): CliSession[] {
+    const home = process.env.HOME || '';
+    const sessionsDir = path.join(home, '.claude', 'sessions');
+    const sessions: CliSession[] = [];
+
+    try {
+      const files = fs.readdirSync(sessionsDir);
+      for (const file of files) {
+        // Only process {pid}.json files
+        if (!file.endsWith('.json')) continue;
+        const pidStr = file.slice(0, -5);
+        const pid = parseInt(pidStr, 10);
+        if (isNaN(pid)) continue;
+
+        try {
+          const filePath = path.join(sessionsDir, file);
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const data = JSON.parse(content);
+
+          // Check if process is still active
+          const isActive = this.isProcessActive(pid);
+
+          sessions.push({
+            sessionId: data.sessionId,
+            pid,
+            cwd: data.cwd,
+            startedAt: data.startedAt,
+            kind: data.kind || 'interactive',
+            entrypoint: data.entrypoint || 'cli',
+            name: data.name || '',
+            isActive,
+          });
+        } catch {
+          // Skip files that can't be parsed
+        }
+      }
+    } catch {
+      // Directory doesn't exist or can't be read
+      return [];
+    }
+
+    // Sort by startedAt descending (newest first)
+    return sessions.sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /**
+   * Get a specific CLI session by sessionId.
+   * Supports both full ID and prefix matching.
+   */
+  getCliSession(sessionId: string): CliSession | null {
+    const sessions = this.listCliSessions();
+    return sessions.find(s =>
+      s.sessionId === sessionId || s.sessionId.startsWith(sessionId)
+    ) || null;
   }
 
   // ── Sessions ──
