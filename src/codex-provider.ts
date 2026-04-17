@@ -188,8 +188,11 @@ export class CodexProvider implements LLMProvider {
                       const threadId = event.thread_id as string;
                       self.threadIds.set(params.sessionId, threadId);
 
+                      // Include agent: 'codex' so conversation-engine routes the
+                      // session ID to codexSessionId (not sdkSessionId / Claude field).
                       controller.enqueue(sseEvent('status', {
                         session_id: threadId,
+                        agent: 'codex',
                       }));
                       break;
                     }
@@ -204,13 +207,15 @@ export class CodexProvider implements LLMProvider {
                       const usage = event.usage as Record<string, unknown> | undefined;
                       const threadId = self.threadIds.get(params.sessionId);
 
+                      // Include agent: 'codex' so conversation-engine routes the
+                      // session ID to codexSessionId (not sdkSessionId / Claude field).
                       controller.enqueue(sseEvent('result', {
                         usage: usage ? {
                           input_tokens: usage.input_tokens ?? 0,
                           output_tokens: usage.output_tokens ?? 0,
                           cache_read_input_tokens: usage.cached_input_tokens ?? 0,
                         } : undefined,
-                        ...(threadId ? { session_id: threadId } : {}),
+                        ...(threadId ? { session_id: threadId, agent: 'codex' } : {}),
                       }));
                       break;
                     }

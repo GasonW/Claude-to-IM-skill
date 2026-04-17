@@ -216,6 +216,8 @@ export class JsonFileStore implements BridgeStore {
         codepilotSessionId: data.codepilotSessionId,
         workingDirectory: data.workingDirectory,
         model: data.model,
+        ...(data.agent !== undefined ? { agent: data.agent } : {}),
+        ...(data.codexSessionId !== undefined ? { codexSessionId: data.codexSessionId } : {}),
         updatedAt: now(),
       };
       this.bindings.set(key, updated);
@@ -234,6 +236,8 @@ export class JsonFileStore implements BridgeStore {
       active: true,
       createdAt: now(),
       updatedAt: now(),
+      ...(data.agent !== undefined ? { agent: data.agent } : {}),
+      ...(data.codexSessionId !== undefined ? { codexSessionId: data.codexSessionId } : {}),
     };
     this.bindings.set(key, binding);
     this.persistBindings();
@@ -370,8 +374,12 @@ export class JsonFileStore implements BridgeStore {
 
   // ── CLI Sessions ──
 
-  private getSessionsDir(): string {
+  private getClaudeSessionsDir(): string {
     return path.join(process.env.HOME || '', '.claude', 'sessions');
+  }
+
+  private getCodexSessionsDir(): string {
+    return path.join(process.env.HOME || '', '.codex', 'sessions');
   }
 
   private isPidAlive(pid: number): boolean {
@@ -383,8 +391,46 @@ export class JsonFileStore implements BridgeStore {
     }
   }
 
-  listCliSessions(): CliSession[] {
-    const sessionsDir = this.getSessionsDir();
+  /**
+   * Read only the first line of a file efficiently (for JSONL session_meta).
+   * Codex session_meta lines can be large (~14 KB) due to base_instructions.
+   * We read in 16 KB chunks and expand if no newline is found, up to 128 KB.
+   */
+  private readFirstLine(filePath: string): string | null {
+    try {
+      const fd = fs.openSync(filePath, 'r');
+      let chunkSize = 16 * 1024;
+      const maxSize = 128 * 1024;
+      let totalRead = 0;
+      let content = '';
+
+      while (totalRead < maxSize) {
+        const buf = Buffer.alloc(chunkSize);
+        const bytesRead = fs.readSync(fd, buf, 0, chunkSize, totalRead);
+        if (bytesRead === 0) break;
+
+        const chunk = buf.slice(0, bytesRead).toString('utf-8');
+        content += chunk;
+        totalRead += bytesRead;
+
+        const nl = content.indexOf('\n');
+        if (nl >= 0) {
+          fs.closeSync(fd);
+          return content.slice(0, nl);
+        }
+        chunkSize = Math.min(chunkSize * 2, maxSize - totalRead);
+      }
+
+      fs.closeSync(fd);
+      return content || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Scan ~/.claude/sessions/{pid}.json for Claude Code CLI sessions. */
+  private listClaudeSessions(): CliSession[] {
+    const sessionsDir = this.getClaudeSessionsDir();
     try {
       const files = fs.readdirSync(sessionsDir).filter(f => /^\d+\.json$/.test(f));
       const sessions: CliSession[] = [];
@@ -406,6 +452,91 @@ export class JsonFileStore implements BridgeStore {
       }
       return sessions;
     } catch { return []; }
+  }
+
+  /**
+   * Scan ~/.codex/sessions/{year}/{month}/{day}/rollout-*.jsonl for Codex threads.
+   * Only the most recent sessions are returned (last maxDays days, up to maxTotal).
+   * The first line of each JSONL file is the session_meta with thread ID and cwd.
+   */
+  private listCodexSessions(maxDays = 30, maxTotal = 50): CliSession[] {
+    const baseDir = this.getCodexSessionsDir();
+    if (!fs.existsSync(baseDir)) return [];
+
+    const cutoff = Date.now() - maxDays * 24 * 60 * 60 * 1000;
+    const allFiles: { filePath: string; mtime: number }[] = [];
+
+    try {
+      const years = fs.readdirSync(baseDir)
+        .filter(y => /^\d{4}$/.test(y))
+        .sort().reverse();
+
+      for (const year of years) {
+        if (parseInt(year) < new Date(cutoff).getFullYear() - 1) break;
+        const yearDir = path.join(baseDir, year);
+
+        const months = fs.readdirSync(yearDir)
+          .filter(m => /^\d{2}$/.test(m))
+          .sort().reverse();
+
+        for (const month of months) {
+          const monthDir = path.join(yearDir, month);
+          const days = fs.readdirSync(monthDir)
+            .filter(d => /^\d{2}$/.test(d))
+            .sort().reverse();
+
+          for (const day of days) {
+            const dateTs = new Date(`${year}-${month}-${day}`).getTime();
+            if (dateTs < cutoff) continue;
+
+            const dayDir = path.join(monthDir, day);
+            const files = fs.readdirSync(dayDir)
+              .filter(f => f.startsWith('rollout-') && f.endsWith('.jsonl'));
+
+            for (const file of files) {
+              const filePath = path.join(dayDir, file);
+              try {
+                const stat = fs.statSync(filePath);
+                allFiles.push({ filePath, mtime: stat.mtimeMs });
+              } catch { /* skip */ }
+            }
+          }
+        }
+      }
+    } catch { return []; }
+
+    // Sort newest-first, cap at maxTotal
+    allFiles.sort((a, b) => b.mtime - a.mtime);
+
+    const sessions: CliSession[] = [];
+    for (const { filePath, mtime } of allFiles.slice(0, maxTotal)) {
+      try {
+        const firstLine = this.readFirstLine(filePath);
+        if (!firstLine) continue;
+
+        const meta = JSON.parse(firstLine);
+        if (meta.type !== 'session_meta') continue;
+
+        const p = meta.payload;
+        if (!p?.id) continue;
+
+        sessions.push({
+          sessionId: p.id,
+          pid: 0,     // Codex threads have no OS-level PID to check
+          cwd: p.cwd || '',
+          startedAt: p.timestamp ? new Date(p.timestamp).getTime() : mtime,
+          kind: 'thread',
+          entrypoint: p.source || 'sdk',
+          isActive: false,   // Codex threads don't expose a running PID
+          agent: 'codex',
+        });
+      } catch { /* skip malformed */ }
+    }
+    return sessions;
+  }
+
+  listCliSessions(): CliSession[] {
+    return [...this.listClaudeSessions(), ...this.listCodexSessions()];
   }
 
   getCliSession(sessionId: string): CliSession | null {
