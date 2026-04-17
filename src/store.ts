@@ -536,7 +536,9 @@ export class JsonFileStore implements BridgeStore {
   }
 
   listCliSessions(): CliSession[] {
-    return [...this.listClaudeSessions(), ...this.listCodexSessions()];
+    // Claude: all sessions with a living PID (no cap needed — usually just a handful)
+    // Codex: cap at 7 days / 10 sessions to avoid flooding /sessions with history
+    return [...this.listClaudeSessions(), ...this.listCodexSessions(7, 10)];
   }
 
   getCliSession(sessionId: string): CliSession | null {
