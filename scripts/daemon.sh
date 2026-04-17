@@ -48,8 +48,29 @@ ensure_built() {
     fi
   fi
   if [ "$need_build" = "1" ]; then
+    # Snapshot the current working build before overwriting it.
+    # run-daemon.sh will restore this snapshot if the new build crash-loops.
+    if [ -f "$SKILL_DIR/dist/daemon.mjs" ] && [ ! -f "$SKILL_DIR/dist/daemon.mjs.stable" ]; then
+      cp "$SKILL_DIR/dist/daemon.mjs" "$SKILL_DIR/dist/daemon.mjs.stable"
+      echo "Saved initial stable snapshot → dist/daemon.mjs.stable"
+    elif [ -f "$SKILL_DIR/dist/daemon.mjs" ]; then
+      cp "$SKILL_DIR/dist/daemon.mjs" "$SKILL_DIR/dist/daemon.mjs.prebuild"
+      echo "Pre-build snapshot → dist/daemon.mjs.prebuild"
+    fi
     echo "Building daemon bundle..."
-    (cd "$SKILL_DIR" && npm run build)
+    if (cd "$SKILL_DIR" && npm run build); then
+      echo "Build succeeded."
+      # Promote the pre-build snapshot to stable if it exists
+      [ -f "$SKILL_DIR/dist/daemon.mjs.prebuild" ] && mv "$SKILL_DIR/dist/daemon.mjs.prebuild" "$SKILL_DIR/dist/daemon.mjs.stable"
+    else
+      echo "Build FAILED. Restoring pre-build snapshot..."
+      if [ -f "$SKILL_DIR/dist/daemon.mjs.prebuild" ]; then
+        cp "$SKILL_DIR/dist/daemon.mjs.prebuild" "$SKILL_DIR/dist/daemon.mjs"
+        mv "$SKILL_DIR/dist/daemon.mjs.prebuild" "$SKILL_DIR/dist/daemon.mjs.stable"
+        echo "Pre-build snapshot restored."
+      fi
+      return 1
+    fi
   fi
 }
 

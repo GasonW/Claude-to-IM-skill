@@ -21,6 +21,14 @@ build_env_dict() {
     dict+="${indent}<key>${var}</key>\n${indent}<string>${val}</string>\n"
   done
 
+  # Forward NODE path explicitly so run-daemon.sh can find it even in a
+  # stripped launchd environment where PATH may not include Homebrew/nvm/fnm.
+  local node_bin
+  node_bin=$(command -v node 2>/dev/null || true)
+  if [ -n "$node_bin" ]; then
+    dict+="${indent}<key>NODE</key>\n${indent}<string>${node_bin}</string>\n"
+  fi
+
   # Forward CTI_* vars
   while IFS='=' read -r name val; do
     case "$name" in CTI_*)
@@ -73,10 +81,12 @@ generate_plist() {
     <key>Label</key>
     <string>${LAUNCHD_LABEL}</string>
 
+    <!-- run-daemon.sh wraps the node process with crash-loop detection and
+         automatic rollback to the last stable build after MAX_CRASHES fast exits. -->
     <key>ProgramArguments</key>
     <array>
-        <string>${node_path}</string>
-        <string>${SKILL_DIR}/dist/daemon.mjs</string>
+        <string>/bin/bash</string>
+        <string>${SKILL_DIR}/scripts/run-daemon.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -87,17 +97,20 @@ generate_plist() {
     <key>StandardErrorPath</key>
     <string>${LOG_FILE}</string>
 
+    <!-- RunAtLoad=true: auto-start when user logs in after reboot -->
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
+    <!-- KeepAlive=true: unconditional restart on any exit (crash, kill, or clean).
+         Intentional stops use `launchctl bootout` which removes the service entirely,
+         preventing launchd from restarting. This fixes the bug where daemon.exit(0)
+         after SIGTERM was treated as a "successful exit" and not restarted. -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
+    <!-- 15s throttle prevents tight crash loops from spinning CPU -->
     <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <integer>15</integer>
 
     <key>EnvironmentVariables</key>
     <dict>

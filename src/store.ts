@@ -400,6 +400,7 @@ export class JsonFileStore implements BridgeStore {
             kind: raw.kind || 'interactive',
             entrypoint: raw.entrypoint || 'cli',
             isActive: this.isPidAlive(raw.pid),
+            agent: 'claude',
           });
         } catch { /* skip malformed */ }
       }
