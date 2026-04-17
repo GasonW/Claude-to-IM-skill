@@ -55,9 +55,14 @@ function shouldPassModelToCodex(): boolean {
   return process.env.CTI_CODEX_PASS_MODEL === 'true';
 }
 
-/** Allow Codex to run outside a trusted Git repository when explicitly enabled. */
+/**
+ * Whether to skip Codex's trusted-git-repo check.
+ * Defaults to true for bridge usage — the user explicitly selected the
+ * working directory, so the git-repo guard adds no meaningful security.
+ * Set CTI_CODEX_SKIP_GIT_REPO_CHECK=false to restore strict mode.
+ */
 function shouldSkipGitRepoCheck(): boolean {
-  return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
+  return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK !== 'false';
 }
 
 function shouldRetryFreshThread(message: string): boolean {
