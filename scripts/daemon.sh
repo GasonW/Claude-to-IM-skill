@@ -8,7 +8,23 @@ LOG_FILE="$CTI_HOME/logs/bridge.log"
 
 # ── Common helpers ──
 
-ensure_dirs() { mkdir -p "$CTI_HOME"/{data,logs,runtime,data/messages}; }
+ensure_dirs() { mkdir -p "$CTI_HOME"/{data,logs,runtime,data/messages,bin}; }
+
+# Keep ~/.claude-to-im/bin/claude symlink pointing to the latest native binary.
+# This gives the Claude Agent SDK a space-free, stable path it can spawn directly.
+refresh_native_symlink() {
+  local bin_dir="$CTI_HOME/bin"
+  local link="$bin_dir/claude"
+  local latest
+  latest=$(find "$HOME/Library/Application Support/Claude/claude-code" \
+    -name "claude" -path "*/MacOS/claude" 2>/dev/null | sort -V | tail -1)
+  if [ -z "$latest" ]; then
+    return  # desktop app not installed — leave whatever is there
+  fi
+  if [ "$(readlink "$link" 2>/dev/null)" != "$latest" ]; then
+    ln -sf "$latest" "$link"
+  fi
+}
 
 ensure_built() {
   local need_build=0
@@ -123,6 +139,7 @@ esac
 case "${1:-help}" in
   start)
     ensure_dirs
+    refresh_native_symlink
     ensure_built
 
     # Check if already running (supervisor-aware: launchctl on macOS, PID on Linux)

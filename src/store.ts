@@ -18,6 +18,7 @@ import type {
   PermissionLinkRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
+  CliSession,
 } from 'claude-to-im/src/lib/bridge/host.js';
 import type { ChannelBinding, ChannelType } from 'claude-to-im/src/lib/bridge/types.js';
 import { CTI_HOME } from './config.js';
@@ -365,6 +366,93 @@ export class JsonFileStore implements BridgeStore {
 
   syncSdkTasks(_sessionId: string, _todos: unknown): void {
     // no-op
+  }
+
+  // ── CLI Sessions ──
+
+  private getSessionsDir(): string {
+    return path.join(process.env.HOME || '', '.claude', 'sessions');
+  }
+
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  listCliSessions(): CliSession[] {
+    const sessionsDir = this.getSessionsDir();
+    try {
+      const files = fs.readdirSync(sessionsDir).filter(f => /^\d+\.json$/.test(f));
+      const sessions: CliSession[] = [];
+      for (const file of files) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), 'utf-8'));
+          if (!raw.sessionId || !raw.pid) continue;
+          sessions.push({
+            sessionId: raw.sessionId,
+            pid: raw.pid,
+            cwd: raw.cwd || '',
+            startedAt: raw.startedAt || 0,
+            kind: raw.kind || 'interactive',
+            entrypoint: raw.entrypoint || 'cli',
+            isActive: this.isPidAlive(raw.pid),
+          });
+        } catch { /* skip malformed */ }
+      }
+      return sessions;
+    } catch { return []; }
+  }
+
+  getCliSession(sessionId: string): CliSession | null {
+    const sessions = this.listCliSessions();
+    return sessions.find(s => s.sessionId === sessionId)
+      ?? sessions.find(s => s.sessionId.startsWith(sessionId))
+      ?? null;
+  }
+
+  terminateCliSession(sessionId: string): { success: boolean; reason: string } {
+    const session = this.getCliSession(sessionId);
+    if (!session) return { success: false, reason: 'Session not found' };
+    if (!session.isActive) return { success: false, reason: 'Session is not running' };
+    try {
+      process.kill(session.pid, 'SIGTERM');
+      return { success: true, reason: `Sent SIGTERM to PID ${session.pid}` };
+    } catch (err) {
+      return { success: false, reason: `Kill failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  markSessionTakenOver(
+    sdkSessionId: string,
+    channelType: string,
+    chatId: string,
+    displayName?: string,
+  ): void {
+    const takeoverFile = path.join(this.getSessionsDir(), `${sdkSessionId}.takeover.json`);
+    try {
+      fs.writeFileSync(takeoverFile, JSON.stringify({
+        sdkSessionId,
+        channelType,
+        chatId,
+        displayName,
+        takenOverAt: new Date().toISOString(),
+      }, null, 2), 'utf-8');
+    } catch { /* best effort */ }
+  }
+
+  recordBridgeActivity(sdkSessionId: string, responseText: string): void {
+    const activityFile = path.join(this.getSessionsDir(), `${sdkSessionId}.bridge.json`);
+    try {
+      fs.writeFileSync(activityFile, JSON.stringify({
+        sdkSessionId,
+        lastActivity: new Date().toISOString(),
+        lastResponseSnippet: responseText.slice(0, 200),
+      }, null, 2), 'utf-8');
+    } catch { /* best effort */ }
   }
 
   // ── Provider ──
