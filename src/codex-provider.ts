@@ -113,6 +113,10 @@ export class CodexProvider implements LLMProvider {
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const self = this;
+    console.log(
+      `[codex-provider] streamChat start session=${params.sessionId.slice(0, 8)} ` +
+      `thread=${params.codexSessionId?.slice(0, 12) ?? 'new'} cwd=${params.workingDirectory ?? '?'}`,
+    );
 
     return new ReadableStream<string>({
       start(controller) {
@@ -120,6 +124,7 @@ export class CodexProvider implements LLMProvider {
           const tempFiles: string[] = [];
           try {
             const { codex } = await self.ensureSDK();
+            console.log('[codex-provider] SDK ready, resolving thread...');
 
             // Resolve or create thread
             const inMemoryThreadId = self.threadIds.get(params.sessionId);
@@ -187,6 +192,7 @@ export class CodexProvider implements LLMProvider {
                     case 'thread.started': {
                       const threadId = event.thread_id as string;
                       self.threadIds.set(params.sessionId, threadId);
+                      console.log(`[codex-provider] thread.started id=${threadId.slice(0, 12)}`);
 
                       // Include agent: 'codex' so conversation-engine routes the
                       // session ID to codexSessionId (not sdkSessionId / Claude field).
@@ -204,6 +210,7 @@ export class CodexProvider implements LLMProvider {
                     }
 
                     case 'turn.completed': {
+                      console.log('[codex-provider] turn.completed');
                       const usage = event.usage as Record<string, unknown> | undefined;
                       const threadId = self.threadIds.get(params.sessionId);
 
@@ -251,7 +258,7 @@ export class CodexProvider implements LLMProvider {
             controller.close();
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
+            console.error('[codex-provider] FATAL error:', err instanceof Error ? err.stack || err.message : err);
             try {
               controller.enqueue(sseEvent('error', message));
               controller.close();

@@ -14,7 +14,7 @@ import * as bridgeManager from 'claude-to-im/src/lib/bridge/bridge-manager.js';
 import 'claude-to-im/src/lib/bridge/adapters/index.js';
 import './adapters/weixin-adapter.js';
 
-import type { LLMProvider } from 'claude-to-im/src/lib/bridge/host.js';
+import type { LLMProvider, StreamChatParams } from 'claude-to-im/src/lib/bridge/host.js';
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';
 import type { Config } from './config.js';
 import { JsonFileStore } from './store.js';
@@ -26,30 +26,99 @@ const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
 const PID_FILE = path.join(RUNTIME_DIR, 'bridge.pid');
 
+// ── Multi-agent routing provider ─────────────────────────────────────────────
+
 /**
- * Resolve the LLM provider based on the runtime setting.
- * - 'claude' (default): uses Claude Code SDK via SDKLLMProvider
- * - 'codex': uses @openai/codex-sdk via CodexProvider
- * - 'auto': tries Claude first, falls back to Codex
+ * Routes each streamChat call to the correct underlying provider based on
+ * params.agent ('claude' | 'codex').  This is what enables per-binding
+ * agent switching via /agent and /switch without restarting the daemon.
+ *
+ * Codex provider is lazily imported so missing @openai/codex-sdk is only
+ * a hard error if/when a Codex session is actually used.
+ */
+class RoutingLLMProvider implements LLMProvider {
+  private codexProvider: LLMProvider | null = null;
+
+  constructor(
+    private readonly claudeProvider: LLMProvider | null,
+    private readonly defaultAgent: 'claude' | 'codex',
+    private readonly pendingPerms: PendingPermissions,
+  ) {}
+
+  private getOrInitCodexProvider(): LLMProvider {
+    if (!this.codexProvider) {
+      // @openai/codex-sdk is optional; the dynamic require must be sync here
+      // because streamChat returns a ReadableStream, not a Promise.
+      // CodexProvider's ensureSDK() is async internally — we just create
+      // the instance (no I/O at construction time).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { CodexProvider } = require('./codex-provider.js');
+      this.codexProvider = new CodexProvider(this.pendingPerms);
+      console.log('[routing-llm] Codex provider initialised');
+    }
+    return this.codexProvider!;
+  }
+
+  streamChat(params: StreamChatParams): ReadableStream<string> {
+    const agent = params.agent || this.defaultAgent;
+
+    if (agent === 'codex') {
+      console.log(
+        `[routing-llm] → Codex  session=${params.sessionId.slice(0, 8)} ` +
+        `thread=${params.codexSessionId?.slice(0, 12) ?? 'new'}`,
+      );
+      return this.getOrInitCodexProvider().streamChat(params);
+    }
+
+    if (this.claudeProvider) {
+      console.log(
+        `[routing-llm] → Claude session=${params.sessionId.slice(0, 8)} ` +
+        `sdk=${params.sdkSessionId?.slice(0, 12) ?? 'new'}`,
+      );
+      return this.claudeProvider.streamChat(params);
+    }
+
+    // Claude requested but not available (CTI_RUNTIME=codex)
+    console.error('[routing-llm] Claude provider not available (CTI_RUNTIME=codex)');
+    const { sseEvent } = require('./sse-utils.js');
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEvent('error', 'Claude provider not available. Set CTI_RUNTIME=claude or CTI_RUNTIME=auto.'));
+        controller.close();
+      },
+    });
+  }
+}
+
+// ── Provider resolution ───────────────────────────────────────────────────────
+
+/**
+ * Build the LLM provider based on the runtime setting.
+ * Always returns a RoutingLLMProvider so /agent switching works at runtime.
+ *
+ * - 'claude' (default): Claude is primary; Codex initialised lazily on first use
+ * - 'codex': Codex is primary; Claude provider is null (returns error if used)
+ * - 'auto': tries Claude first, falls back to Codex as primary
  */
 async function resolveProvider(config: Config, pendingPerms: PendingPermissions): Promise<LLMProvider> {
   const runtime = config.runtime;
 
   if (runtime === 'codex') {
     const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    const codex = new CodexProvider(pendingPerms);
+    // No Claude provider in pure-codex mode
+    return new RoutingLLMProvider(null, 'codex', pendingPerms);
   }
 
   if (runtime === 'auto') {
     const cliPath = resolveClaudeCliPath();
     if (cliPath) {
-      // Auto mode: preflight the resolved CLI before committing to it.
       const check = preflightCheck(cliPath);
       if (check.ok) {
         console.log(`[claude-to-im] Auto: using Claude CLI at ${cliPath} (${check.version})`);
-        return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
+        const claude = new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
+        return new RoutingLLMProvider(claude, 'claude', pendingPerms);
       }
-      // Preflight failed — fall through to Codex instead of silently using a broken CLI
       console.warn(
         `[claude-to-im] Auto: Claude CLI at ${cliPath} failed preflight: ${check.error}\n` +
         `  Falling back to Codex.`,
@@ -58,10 +127,11 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
       console.log('[claude-to-im] Auto: Claude CLI not found, falling back to Codex');
     }
     const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    const codex = new CodexProvider(pendingPerms);
+    return new RoutingLLMProvider(null, 'codex', pendingPerms);
   }
 
-  // Default: claude
+  // Default: claude — Claude is primary, Codex available lazily
   const cliPath = resolveClaudeCliPath();
   if (!cliPath) {
     console.error(
@@ -73,9 +143,6 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
     process.exit(1);
   }
 
-  // Preflight: verify the CLI can actually run in the daemon environment.
-  // In claude runtime this is fatal — starting with a broken CLI would just
-  // defer the error to the first user message, which is harder to diagnose.
   const check = preflightCheck(cliPath);
   if (check.ok) {
     console.log(`[claude-to-im] CLI preflight OK: ${cliPath} (${check.version})`);
@@ -92,7 +159,8 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
     process.exit(1);
   }
 
-  return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
+  const claude = new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
+  return new RoutingLLMProvider(claude, 'claude', pendingPerms);
 }
 
 interface StatusInfo {
