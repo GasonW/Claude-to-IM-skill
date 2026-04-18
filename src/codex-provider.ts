@@ -133,7 +133,7 @@ export class CodexProvider implements LLMProvider {
 
             // Resolve or create thread
             const inMemoryThreadId = self.threadIds.get(params.sessionId);
-            let savedThreadId = inMemoryThreadId || params.sdkSessionId || undefined;
+            let savedThreadId = inMemoryThreadId || params.codexSessionId || undefined;
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
             const passModel = shouldPassModelToCodex();

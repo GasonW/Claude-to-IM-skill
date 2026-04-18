@@ -245,7 +245,7 @@ describe('CodexProvider', () => {
     assert.equal(chunks.length, 0);
   });
 
-  it('does not pass model by default and still attempts resume for persisted thread ids', async () => {
+  it('does not pass model by default and resumes the persisted Codex thread id', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
@@ -280,17 +280,53 @@ describe('CodexProvider', () => {
     const stream = provider.streamChat({
       prompt: 'hello',
       sessionId: 'model-default-session',
-      sdkSessionId: 'old-claude-session-id',
+      codexSessionId: 'codex-thread-456',
       model: 'claude-sonnet-4-20250514',
     });
 
     await collectStream(stream);
 
     assert.equal(resumeCalls, 1, 'Should attempt resume for the persisted thread id');
-    assert.equal(resumedThreadId, 'old-claude-session-id');
+    assert.equal(resumedThreadId, 'codex-thread-456');
     assert.equal(startCalls, 0, 'Should not eagerly start a fresh thread when resume is available');
     assert.ok(capturedResumeOptions, 'resumeThread options should be captured');
     assert.ok(!Object.prototype.hasOwnProperty.call(capturedResumeOptions!, 'model'), 'Model should not be forwarded by default');
+  });
+
+  it('prefers codexSessionId over sdkSessionId when resuming a switched Codex chat', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let resumedThreadId: string | undefined;
+
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      resumeThread: (threadId: string) => {
+        resumedThreadId = threadId;
+        return mockThread;
+      },
+      startThread: () => mockThread,
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'continue codex thread',
+      sessionId: 'switched-codex-session',
+      sdkSessionId: 'old-claude-session-id',
+      codexSessionId: 'codex-thread-789',
+    });
+
+    await collectStream(stream);
+
+    assert.equal(resumedThreadId, 'codex-thread-789');
   });
 
   it('reuses the in-memory Codex thread even when the stored model is Claude-like', async () => {
@@ -454,7 +490,7 @@ describe('CodexProvider', () => {
     const stream = provider.streamChat({
       prompt: 'retry test',
       sessionId: 'resume-retry-session',
-      sdkSessionId: 'codex-old-thread-id',
+      codexSessionId: 'codex-old-thread-id',
       model: 'gpt-5-codex',
     });
 

@@ -6,6 +6,7 @@ import { JsonFileStore } from '../store.js';
 import { CTI_HOME } from '../config.js';
 
 const DATA_DIR = path.join(CTI_HOME, 'data');
+const CLAUDE_SESSIONS_DIR = path.join(process.env.HOME || '', '.claude', 'sessions');
 
 // We construct the store with a settings map directly
 function makeSettings(): Map<string, string> {
@@ -53,23 +54,27 @@ describe('JsonFileStore', () => {
       channelType: 'telegram',
       chatId: '123',
       codepilotSessionId: 'sess-1',
+      sdkSessionId: 'sdk-1',
       workingDirectory: '/tmp',
       model: 'model-1',
     });
     assert.ok(b1.id);
     assert.equal(b1.channelType, 'telegram');
     assert.equal(b1.chatId, '123');
+    assert.equal(b1.sdkSessionId, 'sdk-1');
 
     // Upsert same channel+chat should update
     const b2 = store.upsertChannelBinding({
       channelType: 'telegram',
       chatId: '123',
       codepilotSessionId: 'sess-2',
+      sdkSessionId: 'sdk-2',
       workingDirectory: '/tmp/new',
       model: 'model-2',
     });
     assert.equal(b2.id, b1.id);
     assert.equal(b2.codepilotSessionId, 'sess-2');
+    assert.equal(b2.sdkSessionId, 'sdk-2');
   });
 
   it('upsertChannelBinding uses default mode from settings', () => {
@@ -315,6 +320,39 @@ describe('JsonFileStore', () => {
     store.updateSessionModel(session.id, 'model-new');
     const updated = store.getSession(session.id);
     assert.equal(updated?.model, 'model-new');
+  });
+
+  it('markSessionTakenOver writes takeover metadata for Claude sessions', () => {
+    const store = new JsonFileStore(makeSettings());
+    const sessionId = `test-takeover-${Date.now()}`;
+    const takeoverFile = path.join(CLAUDE_SESSIONS_DIR, `${sessionId}.takeover.json`);
+    fs.rmSync(takeoverFile, { force: true });
+
+    store.markSessionTakenOver(sessionId, 'feishu', 'chat-1', 'Tester');
+
+    assert.equal(fs.existsSync(takeoverFile), true);
+    const content = JSON.parse(fs.readFileSync(takeoverFile, 'utf-8'));
+    assert.equal(content.sdkSessionId, sessionId);
+    assert.equal(content.channelType, 'feishu');
+    assert.equal(content.chatId, 'chat-1');
+
+    fs.rmSync(takeoverFile, { force: true });
+  });
+
+  it('recordBridgeActivity writes response summary for Claude sessions', () => {
+    const store = new JsonFileStore(makeSettings());
+    const sessionId = `test-activity-${Date.now()}`;
+    const activityFile = path.join(CLAUDE_SESSIONS_DIR, `${sessionId}.bridge.json`);
+    fs.rmSync(activityFile, { force: true });
+
+    store.recordBridgeActivity(sessionId, 'hello from bridge activity');
+
+    assert.equal(fs.existsSync(activityFile), true);
+    const content = JSON.parse(fs.readFileSync(activityFile, 'utf-8'));
+    assert.equal(content.sdkSessionId, sessionId);
+    assert.equal(content.lastResponseSnippet, 'hello from bridge activity');
+
+    fs.rmSync(activityFile, { force: true });
   });
 
   // ── Provider (no-op) ──

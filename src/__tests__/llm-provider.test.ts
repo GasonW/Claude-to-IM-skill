@@ -6,6 +6,7 @@ import {
   classifyAuthError,
   isNonClaudeModel,
   parseCliMajorVersion,
+  buildSubprocessEnv,
   handleMessage,
 } from '../llm-provider.js';
 import type { StreamState } from '../llm-provider.js';
@@ -176,6 +177,36 @@ describe('parseCliMajorVersion', () => {
   });
 });
 
+describe('buildSubprocessEnv', () => {
+  it('strips ANTHROPIC_* when resuming a local Claude session', () => {
+    const oldBaseUrl = process.env.ANTHROPIC_BASE_URL;
+    const oldToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    const oldPath = process.env.PATH;
+    const oldIsolation = process.env.CTI_ENV_ISOLATION;
+
+    process.env.ANTHROPIC_BASE_URL = 'https://relay.example.com';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'secret-token';
+    process.env.PATH = '/usr/bin';
+    process.env.CTI_ENV_ISOLATION = 'inherit';
+
+    try {
+      const env = buildSubprocessEnv({ stripAnthropic: true });
+      assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+      assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+      assert.equal(env.PATH, '/usr/bin');
+    } finally {
+      if (oldBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+      else process.env.ANTHROPIC_BASE_URL = oldBaseUrl;
+      if (oldToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = oldToken;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldIsolation === undefined) delete process.env.CTI_ENV_ISOLATION;
+      else process.env.CTI_ENV_ISOLATION = oldIsolation;
+    }
+  });
+});
+
 // ── handleMessage + StreamState ──
 
 describe('handleMessage state tracking', () => {
@@ -225,6 +256,26 @@ describe('handleMessage state tracking', () => {
       total_cost_usd: 0.001,
     } as any, controller, state);
 
+    assert.equal(state.hasReceivedResult, true);
+  });
+
+  it('emits error text for success results flagged as errors', () => {
+    const { controller, chunks } = makeFakeController();
+    const state = freshState();
+
+    handleMessage({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'sess1',
+      is_error: true,
+      result: 'Failed to authenticate. API Error: 401 Unauthorized',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      total_cost_usd: 0,
+    } as any, controller, state);
+
+    const errorEvent = chunks.find((chunk) => chunk.includes('"type":"error"'));
+    assert.ok(errorEvent, 'should emit an error event');
+    assert.match(errorEvent || '', /Failed to authenticate/);
     assert.equal(state.hasReceivedResult, true);
   });
 

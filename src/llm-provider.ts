@@ -93,15 +93,17 @@ export function isNonClaudeModel(model?: string): boolean {
  *               already runs in a clean launchd/setsid environment)
  *   "strict"  — only whitelist + CTI_* + ANTHROPIC_* from config.env
  */
-export function buildSubprocessEnv(): Record<string, string> {
+export function buildSubprocessEnv(options: { stripAnthropic?: boolean } = {}): Record<string, string> {
   const mode = process.env.CTI_ENV_ISOLATION || 'inherit';
   const out: Record<string, string> = {};
+  const stripAnthropic = options.stripAnthropic === true;
 
   if (mode === 'inherit') {
     // Pass everything except always-stripped vars
     for (const [k, v] of Object.entries(process.env)) {
       if (v === undefined) continue;
       if (ENV_ALWAYS_STRIP.includes(k)) continue;
+      if (stripAnthropic && k.startsWith('ANTHROPIC_')) continue;
       out[k] = v;
     }
   } else {
@@ -117,6 +119,7 @@ export function buildSubprocessEnv(): Record<string, string> {
     const runtime = process.env.CTI_RUNTIME || 'claude';
     if (runtime === 'claude' || runtime === 'auto') {
       for (const [k, v] of Object.entries(process.env)) {
+        if (stripAnthropic) continue;
         if (v !== undefined && k.startsWith('ANTHROPIC_')) out[k] = v;
       }
     }
@@ -442,7 +445,12 @@ export class SDKLLMProvider implements LLMProvider {
           const state: StreamState = { hasReceivedResult: false, hasStreamedText: false, lastAssistantText: '' };
 
           try {
-            const cleanEnv = buildSubprocessEnv();
+            // Imported Claude CLI sessions should resume with the session's native
+            // local auth context. Passing daemon-level ANTHROPIC_* relay creds here
+            // can override that context and turn a valid resumed session into 401s.
+            const cleanEnv = buildSubprocessEnv({
+              stripAnthropic: !!params.sdkSessionId,
+            });
 
             // Cross-runtime migration safety: drop non-Claude model names
             // that may linger in session data from a previous Codex runtime.
@@ -680,6 +688,13 @@ export function handleMessage(
     case 'result': {
       state.hasReceivedResult = true;
       if (msg.subtype === 'success') {
+        if (msg.is_error) {
+          const errorText =
+            ('result' in msg && typeof msg.result === 'string' && msg.result.trim())
+              ? msg.result.trim()
+              : state.lastAssistantText.trim() || 'Unknown error';
+          controller.enqueue(sseEvent('error', errorText));
+        }
         controller.enqueue(
           sseEvent('result', {
             session_id: msg.session_id,

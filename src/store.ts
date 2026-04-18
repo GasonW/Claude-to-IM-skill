@@ -217,6 +217,7 @@ export class JsonFileStore implements BridgeStore {
         workingDirectory: data.workingDirectory,
         model: data.model,
         ...(data.agent !== undefined ? { agent: data.agent } : {}),
+        ...(data.sdkSessionId !== undefined ? { sdkSessionId: data.sdkSessionId } : {}),
         ...(data.codexSessionId !== undefined ? { codexSessionId: data.codexSessionId } : {}),
         updatedAt: now(),
       };
@@ -229,7 +230,7 @@ export class JsonFileStore implements BridgeStore {
       channelType: data.channelType,
       chatId: data.chatId,
       codepilotSessionId: data.codepilotSessionId,
-      sdkSessionId: '',
+      sdkSessionId: data.sdkSessionId ?? '',
       workingDirectory: data.workingDirectory,
       model: data.model,
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
@@ -380,6 +381,16 @@ export class JsonFileStore implements BridgeStore {
 
   private getCodexSessionsDir(): string {
     return path.join(process.env.HOME || '', '.codex', 'sessions');
+  }
+
+  /**
+   * Bridge takeover/activity files are only written for Claude CLI sessions.
+   * Keep them alongside `~/.claude/sessions/*.json` so the CLI can discover them.
+   */
+  private getClaudeSessionArtifactsDir(): string {
+    const dir = this.getClaudeSessionsDir();
+    ensureDir(dir);
+    return dir;
   }
 
   private isPidAlive(pid: number): boolean {
@@ -566,7 +577,7 @@ export class JsonFileStore implements BridgeStore {
     chatId: string,
     displayName?: string,
   ): void {
-    const takeoverFile = path.join(this.getSessionsDir(), `${sdkSessionId}.takeover.json`);
+    const takeoverFile = path.join(this.getClaudeSessionArtifactsDir(), `${sdkSessionId}.takeover.json`);
     try {
       fs.writeFileSync(takeoverFile, JSON.stringify({
         sdkSessionId,
@@ -579,7 +590,7 @@ export class JsonFileStore implements BridgeStore {
   }
 
   recordBridgeActivity(sdkSessionId: string, responseText: string): void {
-    const activityFile = path.join(this.getSessionsDir(), `${sdkSessionId}.bridge.json`);
+    const activityFile = path.join(this.getClaudeSessionArtifactsDir(), `${sdkSessionId}.bridge.json`);
     try {
       fs.writeFileSync(activityFile, JSON.stringify({
         sdkSessionId,
